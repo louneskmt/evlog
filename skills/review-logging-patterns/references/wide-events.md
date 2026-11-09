@@ -271,6 +271,7 @@ export default defineEventHandler(async (event) => {
 - Add enough context to debug without looking elsewhere
 - Use consistent field names across your codebase
 - Let `emit()` calculate duration automatically
+- Call `log.discard()` when a run turns out to have nothing to report (an idle cron or queue poll). The event is not written or drained, `keep` cannot keep it, and it still emits if the run records an error, a fatal message or an audit
 
 ### Don't
 

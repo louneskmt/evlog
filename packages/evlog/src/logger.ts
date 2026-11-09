@@ -125,6 +125,19 @@ export function markWideEventDrainStarted(event: WideEvent | null): void {
   if (state) state.drainStarted = true
 }
 
+/** Each logger that called `discard()`, mapped to whether its event is still dropped. */
+const discardedLoggers: WeakMap<object, () => boolean> = new WeakMap()
+
+/**
+ * True when `emit()` will drop this logger's event because `discard()` was called.
+ * Finish paths check it to skip `keep`, which cannot revive a discarded event.
+ *
+ * @internal Used by middleware and framework integrations.
+ */
+export function isDiscarded(logger: RequestLogger): boolean {
+  return discardedLoggers.get(logger)?.() ?? false
+}
+
 /**
  * @internal Wide-event field merge — exported for test mocks that mirror emit accumulation.
  */
@@ -906,6 +919,7 @@ export const noopLogger: ForkableLogger = {
   warn() {},
   debug() {},
   trace() {},
+  discard() {},
   emit() {
     return null
   },
@@ -961,8 +975,14 @@ export function createLogger<T extends object = Record<string, unknown>>(initial
   let hasFatal = false
   let hasWarn = false
   let manualLevel: LogLevel | undefined
+  let discarded = false
   let emitted = false
   let pendingWideEvent: WideEvent | null = null
+
+  // Dropping an error, a fatal message or an audit silently costs more than one stray event.
+  function isDropped(): boolean {
+    return discarded && !hasError && !hasFatal && context.audit === undefined
+  }
 
   function addLog(level: RequestLogEntry['level'], message: string): void {
     if (!Array.isArray(context.requestLogs)) {
@@ -993,7 +1013,7 @@ export function createLogger<T extends object = Record<string, unknown>>(initial
     auditMethod({ ...input, outcome: 'denied', reason })
   }
 
-  return {
+  const logger: AuditableLogger<T> = {
     audit: auditMethod,
     set(data: FieldContext<T>): void {
       if (emitted) {
@@ -1124,9 +1144,20 @@ export function createLogger<T extends object = Record<string, unknown>>(initial
       }
     },
 
+    discard(): void {
+      discarded = true
+      discardedLoggers.set(logger, isDropped)
+    },
+
     emit(overrides?: FieldContext<T> & { _forceKeep?: boolean, _durationMs?: number }): WideEvent | null {
       if (emitted) {
         warnPostEmit('log.emit()', 'Ignoring duplicate emit.')
+        return null
+      }
+
+      if (isDropped()) {
+        emitted = true
+        pendingWideEvent = null
         return null
       }
 
@@ -1179,6 +1210,7 @@ export function createLogger<T extends object = Record<string, unknown>>(initial
       return { ...context } as FieldContext<T> & Record<string, unknown>
     },
   }
+  return logger
 }
 
 /**

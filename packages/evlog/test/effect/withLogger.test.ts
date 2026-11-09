@@ -174,6 +174,139 @@ describe('evlog/effect withLogger', () => {
     })
   })
 
+  describe('discard', () => {
+    it('emits nothing for a unit that discards its event and succeeds', async () => {
+      const { drain, enrich } = createPipelineSpies()
+
+      await Effect.runPromise(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.set({ digest: { recipients: 0 } })
+        log.discard()
+      }).pipe(withLogger('send-digest', { drain, enrich })))
+
+      expect(enrich).not.toHaveBeenCalled()
+      expect(drain).not.toHaveBeenCalled()
+    })
+
+    it('still emits a unit that fails after discarding its event', async () => {
+      const { drain } = createPipelineSpies()
+
+      await Effect.runPromiseExit(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.discard()
+        return yield* Effect.fail(new Error('mailer unreachable'))
+      }).pipe(withLogger('send-digest', { drain })))
+      await waitForDrainCalls(drain)
+
+      expect(drain).toHaveBeenCalledTimes(1)
+      expect(drainedEvent(drain)).toMatchObject({
+        action: 'send-digest',
+        level: 'error',
+        error: { message: 'mailer unreachable' },
+      })
+    })
+
+    it('emits nothing for a unit that discards its event and is interrupted', async () => {
+      const { drain } = createPipelineSpies()
+
+      await Effect.runPromiseExit(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.discard()
+        return yield* Effect.interrupt
+      }).pipe(withLogger('send-digest', { drain })))
+
+      expect(drain).not.toHaveBeenCalled()
+    })
+
+    it('runs before keep, so a keep callback cannot revive a discarded unit', async () => {
+      const { drain, keep } = createPipelineSpies()
+      keep.mockImplementation((ctx) => {
+        ctx.shouldKeep = true
+      })
+
+      await Effect.runPromise(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.discard()
+      }).pipe(withLogger('send-digest', { drain, keep })))
+
+      expect(keep).not.toHaveBeenCalled()
+      expect(drain).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('emit: onError', () => {
+    it('emits nothing when the unit succeeds', async () => {
+      const { drain, keep } = createPipelineSpies()
+
+      await Effect.runPromise(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.set({ sessions: { expired: 12 } })
+      }).pipe(withLogger('expire-sessions', { drain, keep, emit: 'onError' })))
+
+      expect(keep).not.toHaveBeenCalled()
+      expect(drain).not.toHaveBeenCalled()
+    })
+
+    it('emits the event when the unit fails', async () => {
+      const { drain, keep } = createPipelineSpies()
+
+      await Effect.runPromiseExit(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.set({ sessions: { expired: 12 } })
+        return yield* Effect.fail(new Error('database unreachable'))
+      }).pipe(withLogger('expire-sessions', { drain, keep, emit: 'onError' })))
+      await waitForDrainCalls(drain)
+
+      expect(keep).toHaveBeenCalledTimes(1)
+      expect(drain).toHaveBeenCalledTimes(1)
+      expect(drainedEvent(drain)).toMatchObject({
+        action: 'expire-sessions',
+        level: 'error',
+        sessions: { expired: 12 },
+        error: { message: 'database unreachable' },
+      })
+    })
+
+    it('emits nothing when the unit is interrupted', async () => {
+      const { drain } = createPipelineSpies()
+
+      await Effect.runPromiseExit(Effect.interrupt.pipe(withLogger('expire-sessions', { drain, emit: 'onError' })))
+
+      expect(drain).not.toHaveBeenCalled()
+    })
+
+    it('emits a successful unit that records an audit', async () => {
+      const { drain } = createPipelineSpies()
+
+      await Effect.runPromise(Effect.gen(function* () {
+        const log = yield* EvlogLogger
+        log.audit({ action: 'session.expire', actor: { type: 'system', id: 'cron' }, outcome: 'success' })
+      }).pipe(withLogger('expire-sessions', { drain, emit: 'onError' })))
+      await waitForDrainCalls(drain)
+
+      expect(drainedEvent(drain)).toMatchObject({ audit: { action: 'session.expire' } })
+    })
+
+    it('gates the exit before keep, so a status rule cannot keep an interruption', async () => {
+      const { drain } = createPipelineSpies()
+      initLogger({
+        env: { service: 'effect-test' },
+        pretty: false,
+        sampling: { keep: [{ status: 400 }] },
+      })
+
+      await Effect.runPromiseExit(Effect.interrupt.pipe(withLogger('expire-sessions', {
+        drain,
+        emit: 'onError',
+        keep: (ctx) => {
+          if (ctx.status === 499) ctx.shouldKeep = true
+        },
+      })))
+
+      expect(drain).not.toHaveBeenCalled()
+    })
+  })
+
   describe('redaction', () => {
     it('masks PII and secrets set from Effect code', async () => {
       const { drain } = createPipelineSpies()

@@ -739,6 +739,37 @@ describe('createLogger', () => {
     expect(result).toBeNull()
   })
 
+  it('writes and drains nothing for a discarded event, even when force-kept', async () => {
+    const drain = vi.fn()
+    initLogger({ pretty: false, drain })
+
+    const logger = createLogger({ jobId: 'job-1' })
+    logger.set({ digest: { recipients: 0 } })
+    logger.discard()
+    const result = logger.emit({ _forceKeep: true })
+    await Promise.resolve()
+
+    expect(result).toBeNull()
+    expect(infoSpy).not.toHaveBeenCalled()
+    expect(drain).not.toHaveBeenCalled()
+  })
+
+  it('emits a discarded event once an error is recorded', () => {
+    const logger = createLogger({ jobId: 'job-1' })
+    logger.discard()
+    logger.error(new Error('mailer unreachable'))
+
+    expect(logger.emit()).toMatchObject({ level: 'error', error: { message: 'mailer unreachable' } })
+  })
+
+  it('emits a discarded event that records an audit', () => {
+    const logger = createLogger({ jobId: 'job-1' })
+    logger.audit({ action: 'digest.send', actor: { type: 'system', id: 'cron' }, outcome: 'success' })
+    logger.discard()
+
+    expect(logger.emit()).toMatchObject({ audit: { action: 'digest.send' } })
+  })
+
   it('does not include undefined values from missing HTTP fields', () => {
     const logger = createLogger({ jobId: 'job-1' })
     logger.emit()

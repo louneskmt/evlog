@@ -830,11 +830,30 @@ export interface RequestLogger<T extends object = Record<string, unknown>> {
   trace: (message: string, context?: FieldContext<T>) => void
 
   /**
+   * Drop the wide event: `emit()` then writes, enriches and drains nothing, and
+   * returns `null`, including when an integration emits for you. Neither `keep` nor
+   * head sampling can keep a discarded event.
+   *
+   * An event that records an error, a fatal message or an audit still emits, whether
+   * it was recorded before or after `discard()`, so a unit that fails is never dropped.
+   *
+   * @example
+   * ```ts
+   * const users = await getSubscribedUsers()
+   * if (users.length === 0) {
+   *   log.discard()
+   *   return
+   * }
+   * ```
+   */
+  discard: () => void
+
+  /**
    * Emit the final wide event with all accumulated context.
-   * Returns the emitted WideEvent, or null if the log was sampled out.
+   * Returns the emitted WideEvent, or null if the log was sampled out or discarded.
    *
    * Seals the logger: after this returns (including when the return value is `null`
-   * due to sampling), further mutations are ignored with warnings.
+   * due to sampling or `discard()`), further mutations are ignored with warnings.
    */
   emit: (overrides?: FieldContext<T> & { _forceKeep?: boolean, _durationMs?: number }) => WideEvent | null
 

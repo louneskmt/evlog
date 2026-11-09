@@ -1,7 +1,7 @@
 import type { Tracer } from 'effect'
 import { Effect, Option } from 'effect'
 import { Headers, HttpTraceContext } from 'effect/http'
-import { createLogger } from '../logger'
+import { createLogger, isDiscarded } from '../logger'
 import type { BaseEvlogOptions } from '../shared/middleware'
 import { resolveMiddlewarePluginRunner, runEnrichAndDrain } from '../shared/middleware'
 import type { TailSamplingContext } from '../types'
@@ -21,11 +21,19 @@ export interface WithLoggerOptions extends Pick<BaseEvlogOptions, 'drain' | 'enr
   traceparent?: string
   /** W3C `tracestate` received with `traceparent`, forwarded on outgoing requests. */
   tracestate?: string
+  /**
+   * When the unit emits its wide event. `'always'` (the default) emits it whatever
+   * the exit. `'onError'` emits it only when the unit fails, or records an error or
+   * an audit along the way: success and interruption emit nothing, and `keep` does
+   * not run for them. It is the same as calling `log.discard()` when the unit starts.
+   */
+  emit?: 'always' | 'onError'
 }
 
 function startUnit(action: string, span: Tracer.AnySpan, options: WithLoggerOptions): Unit {
   const start = Date.now()
   const logger = createLogger({ ...options.fields, action, ...traceFields(span) }, { _deferDrain: true })
+  if (options.emit === 'onError') logger.discard()
   return {
     logger,
     finish: exit => Effect.promise(async () => {
@@ -34,9 +42,11 @@ function startUnit(action: string, span: Tracer.AnySpan, options: WithLoggerOpti
       const status = typeof context.status === 'number' ? context.status : undefined
       const duration = elapsedMs(start)
       const tail: TailSamplingContext = { status, duration, context, shouldKeep: false }
-      await options.keep?.(tail)
       const runner = resolveMiddlewarePluginRunner(options)
-      if (runner.hasKeep) await runner.runKeep(tail)
+      if (!isDiscarded(logger)) {
+        await options.keep?.(tail)
+        if (runner.hasKeep) await runner.runKeep(tail)
+      }
       const event = logger.emit({ _forceKeep: tail.shouldKeep, _durationMs: duration })
       if (event) await runEnrichAndDrain(event, options, undefined, status, runner)
     }),

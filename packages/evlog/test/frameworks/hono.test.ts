@@ -419,6 +419,44 @@ describe('evlog/hono', () => {
       expect(drain).toHaveBeenCalledOnce()
     })
 
+    it('emits nothing for a request that discards its event, without running keep', async () => {
+      const { keep, drain, enrich } = createPipelineSpies()
+      keep.mockImplementation((ctx) => {
+        ctx.shouldKeep = true
+      })
+
+      const app = new Hono<EvlogVariables>()
+      app.use(evlog({ keep, drain, enrich }))
+      app.get('/api/digest', (c) => {
+        c.get('log').discard()
+        return c.json({ sent: 0 })
+      })
+
+      const res = await app.request('/api/digest')
+
+      expect(res.status).toBe(200)
+      expect(keep).not.toHaveBeenCalled()
+      expect(enrich).not.toHaveBeenCalled()
+      expect(drain).not.toHaveBeenCalled()
+    })
+
+    it('still emits a request that throws after discarding its event', async () => {
+      const { drain } = createPipelineSpies()
+
+      const app = new Hono<EvlogVariables>()
+      app.use(evlog({ drain }))
+      app.get('/api/digest', (c) => {
+        c.get('log').discard()
+        throw new Error('mailer unreachable')
+      })
+
+      await app.request('/api/digest')
+      await waitForDrainCalls(drain)
+
+      const event = assertHttpEventEmitted(drain, { path: '/api/digest', status: 500, level: 'error' })
+      expect(event.error).toMatchObject({ message: 'mailer unreachable' })
+    })
+
     it('calls drain on error responses', async () => {
       const { drain } = createPipelineSpies()
 
